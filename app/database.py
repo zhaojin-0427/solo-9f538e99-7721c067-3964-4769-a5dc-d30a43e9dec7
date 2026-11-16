@@ -66,9 +66,45 @@ CREATE TABLE IF NOT EXISTS result_item (
     accepted_name    TEXT,
     reason_code      TEXT,
     reason           TEXT,
+    confirmation_id  INTEGER,
+    confirmation_basis TEXT,
     PRIMARY KEY (result_id, line_no)
 );
+
+-- 人工核定：把「无环且所有路径均终止于接受名的分叉」待核观测核定到其中一个终点。
+-- 每个结果的每条观测至多一条核定（同内容重试幂等返回原核定，异内容 409）。
+CREATE TABLE IF NOT EXISTS manual_confirmation (
+    confirmation_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_id         INTEGER NOT NULL REFERENCES result(result_id),
+    batch_id          INTEGER NOT NULL REFERENCES observation_batch(id),
+    observation_code  TEXT NOT NULL,
+    accepted_name     TEXT NOT NULL,
+    basis             TEXT NOT NULL,
+    terminal_set      TEXT NOT NULL,
+    revision_id       INTEGER NOT NULL REFERENCES taxonomy_revision(revision_id),
+    status            TEXT NOT NULL CHECK (status IN ('valid', 'invalidated')),
+    invalidated_reason_code TEXT,
+    invalidated_reason      TEXT,
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    invalidated_at    TEXT,
+    UNIQUE (result_id, observation_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_confirmation_batch_obs
+    ON manual_confirmation(batch_id, observation_code);
+CREATE INDEX IF NOT EXISTS idx_confirmation_status
+    ON manual_confirmation(status);
 """
+
+# 兼容旧版本 SQLite 卷：旧库的 result_item 没有核定列，启动时幂等补齐。
+_MIGRATIONS = (
+    """
+    ALTER TABLE result_item ADD COLUMN confirmation_id INTEGER
+    """,
+    """
+    ALTER TABLE result_item ADD COLUMN confirmation_basis TEXT
+    """,
+)
 
 
 def db_path() -> str:
@@ -89,14 +125,23 @@ def connect(path: str | None = None) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # 旧卷迁移：列已存在时 ALTER 会报错，按现有列集合跳过。
+    existing = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(result_item)")
+    }
+    for statement in _MIGRATIONS:
+        column = statement.split("ADD COLUMN", 1)[1].strip().split()[0]
+        if column not in existing:
+            conn.execute(statement)
     conn.commit()
 
 
 @contextlib.contextmanager
 def immediate_tx(conn: sqlite3.Connection):
-    """立即写事务：同一时刻只允许一个写者，保证生成/更正串行化。
+    """立即写事务：同一时刻只允许一个写者，保证生成/更正/核定串行化。
 
-    任何异常都会回滚，保证失败时不留下部分结果。
+    任何异常都会回滚，保证失败时不留下部分结果或部分核定。
     """
     conn.execute("BEGIN IMMEDIATE")
     try:

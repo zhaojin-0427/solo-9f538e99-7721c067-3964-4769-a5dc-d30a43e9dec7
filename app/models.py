@@ -59,6 +59,20 @@ class ResultCreate(BaseModel):
     revision_id: int | None = Field(None, description="分类表修订 ID，缺省使用当前最新修订")
 
 
+class ConfirmationCreate(BaseModel):
+    result_id: int = Field(..., description="当前供数结果号")
+    observation_code: str = Field(..., min_length=1, description="待核观测在批次内的编号")
+    accepted_name: str = Field(
+        ..., min_length=1, description="候选接受名：必须是该观测分叉路径的终点接受名之一"
+    )
+    basis: str = Field(..., min_length=1, description="人工核定依据（鉴定证据说明）")
+
+    @field_validator("observation_code", "accepted_name", "basis")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return _non_empty(v)
+
+
 # ---------- 响应模型 ----------
 
 class ObservationOut(BaseModel):
@@ -115,6 +129,12 @@ class ResultItemOut(BaseModel):
     accepted_name: str | None
     reason_code: str | None
     reason: str | None
+    confirmation_id: int | None = Field(
+        None, description="套用的有效人工核定号（无核定供数时为 null）"
+    )
+    confirmation_basis: str | None = Field(
+        None, description="人工核定依据（无核定供数时为 null）"
+    )
 
 
 class ResultSummaryOut(BaseModel):
@@ -129,3 +149,21 @@ class ResultSummaryOut(BaseModel):
 
 class ResultDetailOut(ResultSummaryOut):
     items: list[ResultItemOut]
+
+
+class ConfirmationOut(BaseModel):
+    confirmation_id: int
+    result_id: int
+    batch_id: int
+    observation_code: str
+    accepted_name: str
+    basis: str
+    terminal_set: list[str] = Field(
+        ..., description="核定时该观测所有路径的终点接受名集合（JSON 数组，按名称排序）"
+    )
+    revision_id: int = Field(..., description="核定时结果所固定的分类表修订")
+    status: str = Field(..., description="valid 有效 / invalidated 已永久失效")
+    invalidated_reason_code: str | None
+    invalidated_reason: str | None
+    created_at: str
+    invalidated_at: str | None

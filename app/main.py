@@ -4,9 +4,11 @@
 """
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlite3 import Connection
 
 from . import services
@@ -15,6 +17,8 @@ from .models import (
     BatchCreate,
     BatchOut,
     BatchSummaryOut,
+    ConfirmationCreate,
+    ConfirmationOut,
     EdgeOut,
     ObservationOut,
     ResultCreate,
@@ -42,8 +46,10 @@ app = FastAPI(
         "把野外观测的旧物种名沿分类表同义名关系追踪到接受名。"
         "观测至多 100 条/批；分类表整版更正生成新修订（同义关系至多 40 条，允许分叉）；"
         "结果固定批次与修订，可按结果号重读，更正后旧结果自动过期。"
+        "复核员可对无环、所有路径均终止于接受名的分叉待核观测做人工核定，"
+        "后续供数自动套用有效核定。"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -221,9 +227,29 @@ def _row_to_result_detail(conn: Connection, result_id: int) -> ResultDetailOut:
                 accepted_name=r["accepted_name"],
                 reason_code=r["reason_code"],
                 reason=r["reason"],
+                confirmation_id=r["confirmation_id"],
+                confirmation_basis=r["confirmation_basis"],
             )
             for r in items
         ],
+    )
+
+
+def _row_to_confirmation_out(row) -> ConfirmationOut:
+    return ConfirmationOut(
+        confirmation_id=row["confirmation_id"],
+        result_id=row["result_id"],
+        batch_id=row["batch_id"],
+        observation_code=row["observation_code"],
+        accepted_name=row["accepted_name"],
+        basis=row["basis"],
+        terminal_set=json.loads(row["terminal_set"]),
+        revision_id=row["revision_id"],
+        status=row["status"],
+        invalidated_reason_code=row["invalidated_reason_code"],
+        invalidated_reason=row["invalidated_reason"],
+        created_at=row["created_at"],
+        invalidated_at=row["invalidated_at"],
     )
 
 
@@ -251,3 +277,61 @@ def get_result(result_id: int, conn: Connection = Depends(get_conn)):
     if services.get_result(conn, result_id) is None:
         raise HTTPException(status_code=404, detail=f"供数结果不存在：result_id={result_id}")
     return _row_to_result_detail(conn, result_id)
+
+
+# ---------- 人工核定 ----------
+
+@app.post(
+    "/confirmations",
+    response_model=ConfirmationOut,
+    tags=["人工核定"],
+    summary="提交人工核定（仅无环全接受名终点的分叉待核记录；同内容重试幂等，异内容 409）",
+    status_code=201,
+)
+def create_confirmation(payload: ConfirmationCreate, conn: Connection = Depends(get_conn)):
+    try:
+        confirmation_id, replayed = services.create_confirmation(conn, payload)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    row = services.get_confirmation(conn, confirmation_id)
+    response = _row_to_confirmation_out(row)
+    # 同内容重试返回原核定（不新建），用 200 与新建的 201 区分
+    return JSONResponse(
+        content=response.model_dump(),
+        status_code=200 if replayed else 201,
+    )
+
+
+@app.get(
+    "/confirmations",
+    response_model=list[ConfirmationOut],
+    tags=["人工核定"],
+    summary="列出人工核定（可按结果号、状态 valid/invalidated 过滤）",
+)
+def list_confirmations(
+    conn: Connection = Depends(get_conn),
+    result_id: int | None = Query(None, description="按供数结果号过滤"),
+    status: str | None = Query(
+        None, pattern="^(valid|invalidated)$", description="valid/invalidated"
+    ),
+):
+    return [_row_to_confirmation_out(r) for r in
+            services.list_confirmations(conn, result_id, status)]
+
+
+@app.get(
+    "/confirmations/{confirmation_id}",
+    response_model=ConfirmationOut,
+    tags=["人工核定"],
+    summary="按核定号读取核定内容、依据与失效状态",
+)
+def get_confirmation(confirmation_id: int, conn: Connection = Depends(get_conn)):
+    row = services.get_confirmation(conn, confirmation_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"人工核定不存在：confirmation_id={confirmation_id}",
+        )
+    return _row_to_confirmation_out(row)

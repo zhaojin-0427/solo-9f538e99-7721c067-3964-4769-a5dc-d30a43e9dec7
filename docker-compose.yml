@@ -1,7 +1,7 @@
 services:
   eco-api:
     build: .
-    image: eco-name-resolution-api:1.0.0
+    image: eco-name-resolution-api:1.1.0
     container_name: eco-name-resolution-api
     ports:
       - "8000:8000"

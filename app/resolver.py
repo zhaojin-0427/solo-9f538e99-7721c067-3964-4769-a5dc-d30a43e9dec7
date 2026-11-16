@@ -12,6 +12,8 @@
 3. 统计可达子图中的“汇聚点”（无出边的节点）：
    - 汇聚点必须全部是接受名；
    - 汇聚点恰好一个 => 纳入；多个不同接受名 => 分叉；零个且无环 => 无接受名。
+
+人工核定只适用于「无环且所有路径均终止于接受名的分叉」（见 confirmable_endpoints）。
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from dataclasses import dataclass, field
 REASON_CYCLE = "cycle"
 REASON_DIVERGENT = "divergent_accepted"
 REASON_NO_ACCEPTED = "no_accepted_name"
+REASON_MANUAL = "manual_confirmation"
 
 
 @dataclass
@@ -29,6 +32,25 @@ class Resolution:
     reason_code: str | None = None
     reason: str | None = None
     reachable: set[str] = field(default_factory=set)
+    # 可达子图中作为路径终点的接受名（已排序）
+    terminal_set: list[str] = field(default_factory=list)
+    # 可达子图中作为路径终点的非接受名（已排序）
+    non_accepted_sinks: list[str] = field(default_factory=list)
+
+
+def confirmable_endpoints(resolution: Resolution) -> list[str] | None:
+    """返回可人工核定的终点集合；不可核定则返回 None。
+
+    可核定条件：无环、所有路径都终止于接受名（不存在非接受名终点）、
+    且存在多个不同的接受名终点（即分叉冲突 divergent_accepted）。
+    """
+    if (
+        resolution.reason_code == REASON_DIVERGENT
+        and not resolution.non_accepted_sinks
+        and len(resolution.terminal_set) > 1
+    ):
+        return list(resolution.terminal_set)
+    return None
 
 
 def resolve_name(
@@ -90,6 +112,8 @@ def resolve_name(
             reason_code=REASON_CYCLE,
             reason="名称指向关系中存在环，路径无法到达稳定的接受名，待人工核实",
             reachable=reachable,
+            terminal_set=[],
+            non_accepted_sinks=non_accepted_sinks,
         )
     if len(sink_accepted) > 1:
         return Resolution(
@@ -101,12 +125,16 @@ def resolve_name(
                 + "，存在分叉冲突，待人工核实"
             ),
             reachable=reachable,
+            terminal_set=sink_accepted,
+            non_accepted_sinks=non_accepted_sinks,
         )
     if len(sink_accepted) == 1 and not non_accepted_sinks:
         return Resolution(
             included=True,
             accepted_name=sink_accepted[0],
             reachable=reachable,
+            terminal_set=list(sink_accepted),
+            non_accepted_sinks=[],
         )
     # 无环、且没有形成单一接受名汇聚
     if sink_accepted:
@@ -126,4 +154,6 @@ def resolve_name(
         reason_code=REASON_NO_ACCEPTED,
         reason=reason,
         reachable=reachable,
+        terminal_set=sink_accepted,
+        non_accepted_sinks=non_accepted_sinks,
     )
